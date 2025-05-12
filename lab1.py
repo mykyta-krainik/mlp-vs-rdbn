@@ -9,12 +9,13 @@ from sklearn.datasets import load_iris
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.cluster import KMeans
 import seaborn as sns
 
 np.random.seed(42)
 tf.random.set_seed(42)
 
-os.makedirs('cached_datasets', exist_dok=True)
+os.makedirs('cached_datasets', exist_ok=True)
 
 
 class DataLoader:
@@ -92,23 +93,27 @@ class ActivationFunctions:
         return tf.nn.tanh(x)
     
     @staticmethod
+    @tf.function
     def gaussian(x, centers, widths):
         x = tf.cast(x, tf.float32)
         centers = tf.cast(centers, tf.float32)
         widths = tf.cast(widths, tf.float32)
-        expanded_x = tf.expand_dims(x, 2)  # [batch_size, input_dim, 1]
-        expanded_centers = tf.expand_dims(centers, 0)  # [1, input_dim, n_centers]
-        distances = tf.reduce_sum(tf.square(expanded_x - expanded_centers), axis=1)  # [batch_size, n_centers]
+        x_norm_sq = tf.reduce_sum(tf.square(x), axis=1, keepdims=True)  # [batch, 1]
+        centers_sq = tf.reduce_sum(tf.square(centers), axis=0, keepdims=True)  # [1, n_centers]
+        x_dot_c = tf.matmul(x, centers)  # [batch, n_centers]
+        distances = x_norm_sq - 2 * x_dot_c + centers_sq  # [batch, n_centers]
         return tf.exp(-distances / (2 * tf.square(widths)))
     
     @staticmethod
+    @tf.function
     def multiquadric(x, centers, widths):
         x = tf.cast(x, tf.float32)
         centers = tf.cast(centers, tf.float32)
         widths = tf.cast(widths, tf.float32)
-        expanded_x = tf.expand_dims(x, 2)
-        expanded_centers = tf.expand_dims(centers, 0)
-        distances = tf.reduce_sum(tf.square(expanded_x - expanded_centers), axis=1)
+        x_norm_sq = tf.reduce_sum(tf.square(x), axis=1, keepdims=True)  # [batch, 1]
+        centers_sq = tf.reduce_sum(tf.square(centers), axis=0, keepdims=True)  # [1, n_centers]
+        x_dot_c = tf.matmul(x, centers)  # [batch, n_centers]
+        distances = x_norm_sq - 2 * x_dot_c + centers_sq  # [batch, n_centers]
         return tf.sqrt(distances + tf.square(widths))
 
 
@@ -130,6 +135,8 @@ class MLP:
         
         self.model = models.Sequential([
             layers.InputLayer(input_shape=(input_dim,)),
+            layers.Dense(hidden_dim, activation=activation_fn),
+            layers.Dense(hidden_dim, activation=activation_fn),
             layers.Dense(hidden_dim, activation=activation_fn),
             layers.Dense(output_dim, activation='softmax')
         ])
@@ -169,7 +176,7 @@ class MLP:
     def get_hidden_output(self, X):
         hidden_model = models.Model(
             inputs=self.model.inputs,
-            outputs=self.model.layers[0].output
+            outputs=self.model.layers[1].output
         )
         return hidden_model.predict(X)
 
@@ -238,7 +245,12 @@ class RBN:
         return loss, y_pred
     
     def fit(self, X_train, y_train, X_val, y_val, epochs=50, batch_size=32):
+        X_init = X_train.numpy() if isinstance(X_train, tf.Tensor) else X_train
+        kmeans = KMeans(n_clusters=self.n_centers, random_state=42).fit(X_init)
+        centers_np = kmeans.cluster_centers_.T.astype(np.float32)  # [input_dim, n_centers]
+        self.centers.assign(centers_np)
         n_samples = X_train.shape[0]
+
         n_batches = n_samples // batch_size
         
         train_losses = []
